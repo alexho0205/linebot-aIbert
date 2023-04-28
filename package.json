@@ -11,6 +11,7 @@
   "license": "ISC",
   "dependencies": {
     "@line/bot-sdk": "^7.5.2",
+    "airtable": "^0.11.6",
     "console": "^0.7.2",
     "dotenv": "^16.0.3",
     "express": "^4.18.2",

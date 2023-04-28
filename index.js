@@ -10,11 +10,12 @@ const querystring = require("querystring");
 const { CLIENT_RENEG_WINDOW } = require("tls");
 const { Console } = require("console");
 const moment = require("moment");
-require('dotenv').config();
+const Airetable = require("airtable");
+require("dotenv").config();
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const LINE_CHANNEL_TK = process.env.LINE_CHANNEL_TK;
-const LINE_SECRET =  process.env.LINE_SECRET;
+const LINE_SECRET = process.env.LINE_SECRET;
 
 // logger
 const mylogger = new Console({
@@ -62,7 +63,7 @@ function handleEvent(event) {
       const message = event.message;
       switch (message.type) {
         case "text":
-          return handleText(message, event.replyToken, event.source);
+        //  return handleText(message, event.replyToken, event.source);
         case "image":
         //  return handleImage(message, event.replyToken, event.source);
         case "video":
@@ -101,12 +102,6 @@ function handleAudio2(message, replyToken, source) {
     );
     const audioFilePath = path.join(dataPath, `${message.id}.m4a`);
 
-    // const downloadPath = path.join(
-    //   __dirname,
-    //   "downloaded",
-    //   `${message.id}.m4a`
-    // );
-
     // create user folder , 每位用戶有一個專屬資料夾
     createFolderIfNotExist(userPath);
     // create datetime , 每一天有一個專屬資料夾
@@ -116,7 +111,7 @@ function handleAudio2(message, replyToken, source) {
     getContent = downloadContent(message.id, audioFilePath).then(
       (audioFilePath) => {
         // 音檔轉文字, 並回覆用戶
-        convertToText(source.userId,audioFilePath);
+        convertToText(source.userId, audioFilePath);
       }
     );
   } else {
@@ -129,15 +124,15 @@ function handleAudio2(message, replyToken, source) {
 }
 
 // audio to transcript
-async function convertToText(userId,audioFilePath) {
+async function convertToText(userId, audioFilePath) {
   const openaiResponse = await transcribe(audioFilePath);
   const text = openaiResponse.data.text;
-  replyTextByUserId(userId,text);
+  replyTextByUserId(userId, text);
 }
 
 async function transcribe(audioFilePath) {
   const buffer = fs.createReadStream(audioFilePath);
-  if(buffer == null){
+  if (buffer == null) {
     const msg_stream_is_null = "file stream is null.";
     mylogger.info(msg_stream_is_null);
     return msg_stream_is_null;
@@ -163,8 +158,8 @@ function downloadContent(messageId, downloadPath) {
         stream.pipe(writable);
         stream.on("end", () => resolve(downloadPath));
         stream.on("error", reject);
-        console.log('file downloaded!');
-        mylogger.log('file downloaded!');
+        console.log("file downloaded!");
+        mylogger.log("file downloaded!");
       })
   );
 }
@@ -188,11 +183,53 @@ const replyTextByUserId = (userid, retrunMessage) => {
     .catch((err) => {});
 };
 
-function handleText(message, replyToken, source) {
+async function handleText(message, replyToken, source) {
   if (source.userId) {
     const hello = "Hi 讓您久等了！我是您的助理 Albert，樂於為您效勞！ \r\n ";
+
+    // check user table is exist ( on airtable )
+    //const airbase = await getAirtablesByBaseId();
+    //airbase.tables
+
+    //
+
     return replyText(replyToken, hello);
   }
+}
+
+// 依據用戶ID 
+async function getAirtablesByBaseId() {
+  return new Promise((resolve, reject) => {
+    const baseId = process.env.AIRTABLE_BASE_ID;
+    const options = {
+      host: process.env.AIRTABLE_API_URL,
+      path: `/v0/meta/bases/${baseId}/tables`,
+      port: 443,
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${process.env.AIRTABLE_API_TK}`,
+      },
+    };
+
+    const request = https.request(options, (response) => {
+      let data = "";
+      response.on("data", (chunk) => {
+        data += chunk;
+      });
+      response.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.on("error", (error) => {
+      reject(error);
+    });
+    request.end();
+  });
 }
 
 // listen on port

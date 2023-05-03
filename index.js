@@ -28,7 +28,12 @@ const configuration = new Configuration({
   apiKey: OPENAI_API_KEY,
 });
 const openai = new OpenAIApi(configuration);
-const systemContent = "你是一個... \r\n";
+const openai_role_system =
+  "你扮演一個業務助理,請將記錄分類為 '#記事' 與 '#待辦' ,先給#記事再給#待辦,不記錄日期,每項開頭不要使用數字,如果沒有待辦就回答'沒有資料',如果安排會議請加入'解決什麼問題'例如安排會議討論客訴問題,人名需要保留.換行使用\\r\\n \r\n";
+const openai_sys_msg = {
+  role: "system",
+  content: openai_role_system,
+};
 
 // create LINE SDK config from env variables
 const config = {
@@ -63,7 +68,7 @@ function handleEvent(event) {
       const message = event.message;
       switch (message.type) {
         case "text":
-        //  return handleText(message, event.replyToken, event.source);
+          return handleText(message, event.replyToken, event.source);
         case "image":
         //  return handleImage(message, event.replyToken, event.source);
         case "video":
@@ -125,11 +130,110 @@ function handleAudio2(message, replyToken, source) {
 
 // audio to transcript
 async function convertToText(userId, audioFilePath) {
+  // audio to transcript
   const openaiResponse = await transcribe(audioFilePath);
-  const text = openaiResponse.data.text;
-  replyTextByUserId(userId, text);
+  const transcriptText = openaiResponse.data.text;
+
+  // transcriptText to TODO or NOTE
+  const todoOrNote = await translate(transcriptText);
+
+  // save to airtable
+  await saveData(userId, todoOrNote);
+
+  replyTextByUserId(userId, todoOrNote + "\r\n\r\n☁️已存入您的雲端空間.");
 }
 
+// save data to airtable
+async function saveData(userId, todoOrNote) {
+
+  let [memo, todo] = todoOrNote.split(/\n(?=#)/).map(str => str.trim());
+  if( memo != undefined){
+    memo = memo.replace("#記事",'').replace(/^\s*$\n/gm, '').trim();
+  }
+  if( todo != undefined){
+    todo = todo.replace("#待辦",'').replace(/^\s*$\n/gm, '').trim();
+  }
+  
+  return new Promise((resolve, reject) => {
+    const baseId = process.env.AIRTABLE_BASE_ID;
+    const options = {
+      host: process.env.AIRTABLE_API_URL,
+      path: `/v0/${baseId}/${userId}`,
+      port: 443,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.AIRTABLE_API_TK}`,
+        "Content-Type": "application/json",
+      },
+    };
+
+    const DATA = JSON.stringify({
+      records: [
+        {
+          fields: {
+            用戶名稱: userId,
+            用戶編號: userId,
+            記錄時間: moment().format("YYYYMMDD"),
+            待辦: todo,
+            記事: memo,
+          },
+        },
+      ],
+    });
+
+    const request = https.request(options, (response) => {
+      let data = "";
+      response.on("data", (chunk) => {
+        data += chunk;
+      });
+      response.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          console.log(result);
+          if (result.error) {
+            console.log(
+              `airtable : insert data Error  \r\n type:${result.error.type}  \r\n msg:${result.error.message}`
+            );
+          } else {
+            console.log(`airtable : insert data success`);
+          }
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+
+    request.on("error", (error) => {
+      console.log(`airtable: insert data Error , msg: ${result}`);
+      reject(error);
+    });
+    request.write(DATA);
+    request.end();
+  });
+}
+
+// translate with chatgpt
+async function translate(transcriptText) {
+  const openai = new OpenAIApi(configuration);
+  const rs = await openai.createChatCompletion({
+    model: "gpt-3.5-turbo",
+    messages: [
+      openai_sys_msg,
+      {
+        role: "user",
+        content: "記錄:\r\n"+transcriptText,
+      },
+    ],
+    temperature: 0.7,
+  });
+  console.log("gpt responsed!");
+  mylogger.info("gpt responsed!");
+
+  return rs.data.choices[0].message.content;
+}
+
+// openai audio to text
 async function transcribe(audioFilePath) {
   const buffer = fs.createReadStream(audioFilePath);
   if (buffer == null) {
@@ -184,20 +288,180 @@ const replyTextByUserId = (userid, retrunMessage) => {
 };
 
 async function handleText(message, replyToken, source) {
+  if (source.userId && message.text.startsWith('#memo') ) {
+    const date = message.text.slice(5);
+    const rows = await getAirtableData(source.userId, date);
+    let msg = "";
+    rows.records.forEach((r) => {
+      if(r.fields["記事"] != undefined && !r.fields["記事"].includes('沒有資料') ){
+        msg += ('- '+ r.fields["記事"] + '\r\n');
+      }
+    });
+    return replyText(replyToken, msg);
+  }
+
+  if (source.userId && message.text.startsWith('#todo') ) {
+    const date = message.text.slice(5);
+    const rows = await getAirtableData(source.userId, date);
+    let msg = "";
+    rows.records.forEach((r) => {
+      if(r.fields["待辦"] != undefined && !r.fields["待辦"].includes('沒有資料') ){
+        msg += ('- '+r.fields["待辦"] + '\r\n');
+      }
+    });
+    return replyText(replyToken, msg);
+  }
+
   if (source.userId) {
-    const hello = "Hi 讓您久等了！我是您的助理 Albert，樂於為您效勞！ \r\n ";
+    const botName = process.env.BOT_NAME;
+    const hello = `Hi 讓您久等了！ 我是 ${botName} ，樂於為您效勞！ \r\n\r\n`;
+    const tips = `如果您需要查看歷史記錄, 可以輸入以下關鍵字 \r\n #memo20230502 \r\n #todo20230502 `;
 
-    // check user table is exist ( on airtable )
-    //const airbase = await getAirtablesByBaseId();
-    //airbase.tables
-
-    //
-
-    return replyText(replyToken, hello);
+    // check user table-space is exist ( on airtable )
+    const airbase = await getAirtablesByBaseId();
+    let airtableId = "";
+    airbase.tables.forEach((table) => {
+      if (table.name === source.userId) {
+        airtableId = table.id;
+      }
+    });
+    // if table-space not exist , create it !
+    if (airtableId === "") {
+      // create table-space on airtable
+      console.log(
+        ` try create table-space on airtable ... tableId=${source.userId}`
+      );
+      createAirtablesSpace(source.userId);
+    } else {
+      console.log(`table-space already exist , tableId=${airtableId}`);
+    }
+    
+    return replyText(replyToken, hello+tips);
   }
 }
 
-// 依據用戶ID 
+// 取得用戶記錄
+async function getAirtableData(userId, date) {
+  const searchQuery = encodeURIComponent(`{記錄時間}='${date}'`);
+  return new Promise((resolve, reject) => {
+    const baseId = process.env.AIRTABLE_BASE_ID;
+    const options = {
+      host: process.env.AIRTABLE_API_URL,
+      path: `/v0/${baseId}/${userId}?filterByFormula=${searchQuery}`,
+      port: 443,
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${process.env.AIRTABLE_API_TK}`,
+        "Content-Type": "application/json",
+      },
+    };
+    const request = https.request(options, (response) => {
+      let data = "";
+      response.on("data", (chunk) => {
+        data += chunk;
+      });
+      response.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          if (result.error) {
+            console.log(
+              `airtable : query table Error  \r\n type:${result.error.type}  \r\n msg:${result.error.message}`
+            );
+          } else {
+            console.log(`airtable : query table success`);
+          }
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+      response.on("error", () => {
+        console.log(`airtable : response error`);
+      });
+    });
+
+    request.on("error", (error) => {
+      console.log(`airtable: query table Error , msg: ${error.message}`);
+      reject(error);
+    });
+    request.end();
+  });
+}
+
+// 建立 table-space on airtable.
+async function createAirtablesSpace(tableId) {
+  return new Promise((resolve, reject) => {
+    const baseId = process.env.AIRTABLE_BASE_ID;
+    const options = {
+      host: process.env.AIRTABLE_API_URL,
+      path: `/v0/meta/bases/${baseId}/tables`,
+      port: 443,
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.AIRTABLE_API_TK}`,
+        "Content-Type": "application/json",
+      },
+    };
+
+    const AIRTABLE_SCHEMA = JSON.stringify({
+      description: "記事與待辦事項",
+      fields: [
+        {
+          name: "用戶名稱",
+          type: "singleLineText",
+        },
+        {
+          name: "用戶編號",
+          type: "singleLineText",
+        },
+        {
+          name: "記錄時間",
+          type: "singleLineText",
+        },
+        {
+          name: "待辦",
+          type: "singleLineText",
+        },
+        {
+          name: "記事",
+          type: "singleLineText",
+        },
+      ],
+      name: tableId,
+    });
+
+    const request = https.request(options, (response) => {
+      let data = "";
+      response.on("data", (chunk) => {
+        data += chunk;
+      });
+      response.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          if (result.error) {
+            console.log(
+              `airtable : create table Error  \r\n type:${result.error.type}  \r\n msg:${result.error.message}`
+            );
+          } else {
+            console.log(`airtable : create table success`);
+          }
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+
+    request.on("error", (error) => {
+      console.log(`airtable: create table Error , msg: ${result}`);
+      reject(error);
+    });
+    request.write(AIRTABLE_SCHEMA);
+    request.end();
+  });
+}
+
+// 取得 airtable by base id.
 async function getAirtablesByBaseId() {
   return new Promise((resolve, reject) => {
     const baseId = process.env.AIRTABLE_BASE_ID;

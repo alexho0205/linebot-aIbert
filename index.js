@@ -560,12 +560,12 @@ async function getAirtablesByBaseId() {
 
 function sendMail(userid, subject, content) {
   const transporter = nodemailer.createTransport({
-    host: "smtp.office365.com",
+    host: process.env.SMTP_HOST,
     port: 587,
     secure: false,
     auth: {
-      user: "cymkolor@cymmetrik.com",
-      pass: "Mum30651",
+      user: process.env.SMPT_AUTH_USER,
+      pass: process.env.SMPT_AUTH_PWD,
     },
   });
 

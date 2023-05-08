@@ -18,6 +18,7 @@
     "fs": "^0.0.1-security",
     "https": "^1.0.0",
     "moment": "^2.29.4",
+    "nodemailer": "^6.9.1",
     "openai": "^3.2.1",
     "path": "^0.12.7",
     "querystring": "^0.2.1",

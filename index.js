@@ -12,6 +12,7 @@ const { Console } = require("console");
 const moment = require("moment");
 const Airetable = require("airtable");
 require("dotenv").config();
+const nodemailer = require("nodemailer");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const LINE_CHANNEL_TK = process.env.LINE_CHANNEL_TK;
@@ -33,6 +34,11 @@ const openai_role_system =
 const openai_sys_msg = {
   role: "system",
   content: openai_role_system,
+};
+
+const openai_sys_convert_to_log = {
+  role: "system",
+  content: "將我給你的文字使用新聞稿方式重新排版",
 };
 
 // create LINE SDK config from env variables
@@ -145,15 +151,20 @@ async function convertToText(userId, audioFilePath) {
 
 // save data to airtable
 async function saveData(userId, todoOrNote) {
+  let [memo, todo] = todoOrNote.split(/\n(?=#)/).map((str) => str.trim());
+  if (memo != undefined) {
+    memo = memo
+      .replace("#記事", "")
+      .replace(/^\s*$\n/gm, "")
+      .trim();
+  }
+  if (todo != undefined) {
+    todo = todo
+      .replace("#待辦", "")
+      .replace(/^\s*$\n/gm, "")
+      .trim();
+  }
 
-  let [memo, todo] = todoOrNote.split(/\n(?=#)/).map(str => str.trim());
-  if( memo != undefined){
-    memo = memo.replace("#記事",'').replace(/^\s*$\n/gm, '').trim();
-  }
-  if( todo != undefined){
-    todo = todo.replace("#待辦",'').replace(/^\s*$\n/gm, '').trim();
-  }
-  
   return new Promise((resolve, reject) => {
     const baseId = process.env.AIRTABLE_BASE_ID;
     const options = {
@@ -222,13 +233,34 @@ async function translate(transcriptText) {
       openai_sys_msg,
       {
         role: "user",
-        content: "記錄:\r\n"+transcriptText,
+        content: "記錄:\r\n" + transcriptText,
       },
     ],
     temperature: 0.7,
   });
   console.log("gpt responsed!");
   mylogger.info("gpt responsed!");
+
+  return rs.data.choices[0].message.content;
+}
+
+// convert text to log , 文字內容轉為日誌化.
+async function translateToLog(transcriptText) {
+  console.log(transcriptText);
+  const openai = new OpenAIApi(configuration);
+  const rs = await openai.createChatCompletion({
+    model: "gpt-3.5-turbo",
+    messages: [
+      openai_sys_convert_to_log,
+      {
+        role: "user",
+        content: "文字:\r\n" + transcriptText,
+      },
+    ],
+    temperature: 0.7,
+  });
+  console.log("gpt responsed! -- to log");
+  mylogger.info("gpt responsed! -- to log");
 
   return rs.data.choices[0].message.content;
 }
@@ -288,25 +320,55 @@ const replyTextByUserId = (userid, retrunMessage) => {
 };
 
 async function handleText(message, replyToken, source) {
-  if (source.userId && message.text.startsWith('#memo') ) {
+  // 整理成日誌並寄發email.
+  if (source.userId && message.text.startsWith("#logf")) {
     const date = message.text.slice(5);
     const rows = await getAirtableData(source.userId, date);
     let msg = "";
     rows.records.forEach((r) => {
-      if(r.fields["記事"] != undefined && !r.fields["記事"].includes('沒有資料') ){
-        msg += ('- '+ r.fields["記事"] + '\r\n');
+      if (
+        r.fields["記事"] != undefined &&
+        !r.fields["記事"].includes("沒有資料")
+      ) {
+        msg += "- " + r.fields["記事"] + "\r\n";
+      }
+    });
+
+    // conver format by openai
+    translateToLog(msg).then((logContent) =>
+      sendMail(source.userId, `日誌 ${date}`, logContent)
+    );
+
+    return replyText(replyToken, "好的!處理中~ 完成後您將收到mail.");
+  }
+
+  // 整理記事
+  if (source.userId && message.text.startsWith("#memo")) {
+    const date = message.text.slice(5);
+    const rows = await getAirtableData(source.userId, date);
+    let msg = "";
+    rows.records.forEach((r) => {
+      if (
+        r.fields["記事"] != undefined &&
+        !r.fields["記事"].includes("沒有資料")
+      ) {
+        msg += "- " + r.fields["記事"] + "\r\n";
       }
     });
     return replyText(replyToken, msg);
   }
 
-  if (source.userId && message.text.startsWith('#todo') ) {
+  // 整理記事
+  if (source.userId && message.text.startsWith("#todo")) {
     const date = message.text.slice(5);
     const rows = await getAirtableData(source.userId, date);
     let msg = "";
     rows.records.forEach((r) => {
-      if(r.fields["待辦"] != undefined && !r.fields["待辦"].includes('沒有資料') ){
-        msg += ('- '+r.fields["待辦"] + '\r\n');
+      if (
+        r.fields["待辦"] != undefined &&
+        !r.fields["待辦"].includes("沒有資料")
+      ) {
+        msg += "- " + r.fields["待辦"] + "\r\n";
       }
     });
     return replyText(replyToken, msg);
@@ -335,8 +397,8 @@ async function handleText(message, replyToken, source) {
     } else {
       console.log(`table-space already exist , tableId=${airtableId}`);
     }
-    
-    return replyText(replyToken, hello+tips);
+
+    return replyText(replyToken, hello + tips);
   }
 }
 
@@ -493,6 +555,40 @@ async function getAirtablesByBaseId() {
       reject(error);
     });
     request.end();
+  });
+}
+
+function sendMail(userid, subject, content) {
+  const transporter = nodemailer.createTransport({
+    host: "smtp.office365.com",
+    port: 587,
+    secure: false,
+    auth: {
+      user: "cymkolor@cymmetrik.com",
+      pass: "Mum30651",
+    },
+  });
+
+  const mailOptions = {
+    from: "cymkolor@cymmetrik.com",
+    to: "alex.rj.ho@cymmetrik.com",
+    subject: subject,
+    text: '請參考附件',
+    attachments:[
+      {
+        filename:'日誌.txt',
+        content:content
+      }
+    ]
+  };
+
+  transporter.sendMail(mailOptions, (error, info) => {
+    if (error) {
+      console.error(error);
+    } else {
+      console.log("Email sent: " + info.response);
+      replyTextByUserId(userid, "哈囉😊\r\n日誌已發送到您的信箱.");
+    }
   });
 }
 

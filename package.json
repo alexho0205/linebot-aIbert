@@ -21,6 +21,7 @@
     "nodemailer": "^6.9.1",
     "openai": "^3.2.1",
     "path": "^0.12.7",
+    "pdfkit": "^0.13.0",
     "querystring": "^0.2.1",
     "tls": "^0.0.1"
   }

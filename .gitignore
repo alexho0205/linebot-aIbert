@@ -1,3 +1,4 @@
 /.env*
 /audio_*
 /node_modules
+/pdf_file/*        

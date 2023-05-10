@@ -13,10 +13,13 @@ const moment = require("moment");
 const Airetable = require("airtable");
 require("dotenv").config();
 const nodemailer = require("nodemailer");
+const e = require("express");
+const pdfdocument = require("pdfkit");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const LINE_CHANNEL_TK = process.env.LINE_CHANNEL_TK;
 const LINE_SECRET = process.env.LINE_SECRET;
+const isEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // logger
 const mylogger = new Console({
@@ -30,7 +33,7 @@ const configuration = new Configuration({
 });
 const openai = new OpenAIApi(configuration);
 const openai_role_system =
-  "你扮演一個業務助理,請將記錄分類為 '#記事' 與 '#待辦' ,先給#記事再給#待辦,不記錄日期,每項開頭不要使用數字,如果沒有待辦就回答'沒有資料',如果安排會議請加入'解決什麼問題'例如安排會議討論客訴問題,人名需要保留.換行使用\\r\\n \r\n";
+  "你扮演一個業務助理,請將記錄分類為 '#記事' 與 '#待辦' ,先給#記事再給#待辦,不記錄日期,每項開頭不要使用數字,如果沒有待辦就回答'沒有資料',如果安排會議請加入'解決什麼問題'例如安排會議討論客訴問題,人名需要保留.\r\n";
 const openai_sys_msg = {
   role: "system",
   content: openai_role_system,
@@ -320,9 +323,52 @@ const replyTextByUserId = (userid, retrunMessage) => {
 };
 
 async function handleText(message, replyToken, source) {
+  // save user email
+  if (source.userId && message.text.startsWith("#set_mail=")) {
+    let saveReusltMsg = "";
+    const email = message.text.split("=")[1];
+    if (isEmail.test(email)) {
+      await saveAirtableUserMail(source.userId, email);
+      saveReusltMsg = `好的,已將您的email設定為 ${email}\r\n請問您需要什麼服務呢?`;
+    } else {
+      saveReusltMsg = "好的,您還需要什麼服務呢?";
+    }
+    return replyText(replyToken, saveReusltMsg);
+  }
+
+  // 如果是 email 格式. 提示用戶是否更新email位置.
+  if (isEmail.test(message.text)) {
+    return client.replyMessage(replyToken, {
+      type: "template",
+      altText: "Confirm alt text",
+      template: {
+        type: "confirm",
+        text: `將您的email位置改為 ${message.text} ?`,
+        actions: [
+          { label: "Yes", type: "message", text: `#set_mail=${message.text}` },
+          { label: "No", type: "message", text: `#set_mail=PASS` },
+        ],
+      },
+    });
+  }
+
   // 整理成日誌並寄發email.
-  if (source.userId && message.text.startsWith("#logf")) {
-    const date = message.text.slice(5);
+  if (source.userId && message.text.startsWith("#tofile")) {
+    // get user email.
+    let userEmail = "";
+    const result = await getAirtableUserMail(source.userId);
+    if (result.records.length > 0) {
+      userEmail = result.records[0].fields.email;
+    }
+
+    if (userEmail === "") {
+      return replyText(
+        replyToken,
+        "哇!,我還沒有您的Email位置\r\n請輸入您的email"
+      );
+    }
+
+    const date = message.text.slice(7);
     const rows = await getAirtableData(source.userId, date);
     let msg = "";
     rows.records.forEach((r) => {
@@ -336,7 +382,7 @@ async function handleText(message, replyToken, source) {
 
     // conver format by openai
     translateToLog(msg).then((logContent) =>
-      sendMail(source.userId, `日誌 ${date}`, logContent)
+      sendMail( date, userEmail, source.userId, `日誌 ${date}`, logContent)
     );
 
     return replyText(replyToken, "好的!處理中~ 完成後您將收到mail.");
@@ -376,8 +422,8 @@ async function handleText(message, replyToken, source) {
 
   if (source.userId) {
     const botName = process.env.BOT_NAME;
-    const hello = `Hi 讓您久等了！ 我是 ${botName} ，樂於為您效勞！ \r\n\r\n`;
-    const tips = `如果您需要查看歷史記錄, 可以輸入以下關鍵字 \r\n #memo20230502 \r\n #todo20230502 `;
+    const hello = `Hi 讓您久等了！ 我是 ${botName} ，樂於為您效勞！請輸入語音🎤\r\n\r\n`;
+    const tips = `⭐如果需要查看歷史記錄, 可輸入關鍵字 \r\n #memo20230502 \r\n #todo20230502\r\n⭐如果需要轉化為日報型式請輸入\r\n#tofile20230503 `;
 
     // check user table-space is exist ( on airtable )
     const airbase = await getAirtablesByBaseId();
@@ -398,7 +444,215 @@ async function handleText(message, replyToken, source) {
       console.log(`table-space already exist , tableId=${airtableId}`);
     }
 
-    return replyText(replyToken, hello + tips);
+    const yestoday = moment().add(-1,'d').format("YYYYMMDD");
+    const today = moment().format("YYYYMMDD");
+
+    return client.replyMessage(replyToken, {
+      type: "text",
+      text: hello + tips,
+      quickReply: {
+        items: [
+          {
+            type: "action", 
+            action: {
+              type: "message",
+              label: "昨日總結",
+              text: `#memo${yestoday}`,
+            },
+          },
+          {
+            type: "action",
+            action: {
+              type: "message",
+              label: "今日總結",
+              text: `#memo${today}`,
+            },
+          },
+          {
+            type: "action",
+            action: {
+              type: "message",
+              label: "寄給我昨天總結",
+              text: `#tofile${yestoday}`,
+            },
+          },
+        ],
+      },
+    });
+  }
+}
+
+// 取得用戶 email 記錄
+async function getAirtableUserMail(userId) {
+  const searchQuery = encodeURIComponent(`{userid}='${userId}'`);
+
+  return new Promise((resolve, reject) => {
+    const baseId = process.env.AIRTABLE_BASE_ID;
+    const options = {
+      host: process.env.AIRTABLE_API_URL,
+      path: `/v0/${baseId}/UserInfos?filterByFormula=${searchQuery}`,
+      port: 443,
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${process.env.AIRTABLE_API_TK}`,
+        "Content-Type": "application/json",
+      },
+    };
+    const request = https.request(options, (response) => {
+      let data = "";
+      let email = "";
+      response.on("data", (chunk) => {
+        data += chunk;
+      });
+      response.on("end", () => {
+        try {
+          const result = JSON.parse(data);
+          // if (result.records.length > 0) {
+          //   email = result.records[0].email;
+          // }
+
+          if (result.error) {
+            console.log(
+              `airtable : query email Error  \r\n type:${result.error.type}  \r\n msg:${result.error.message}`
+            );
+          } else {
+            console.log(`airtable : query email success`);
+          }
+          resolve(result);
+        } catch (error) {
+          reject(error);
+        }
+      });
+      response.on("error", () => {
+        console.log(`airtable : response error`);
+      });
+    });
+
+    request.on("error", (error) => {
+      console.log(`airtable: query email Error , msg: ${error.message}`);
+      reject(error);
+    });
+    request.end();
+  });
+}
+
+// 取得用戶 email 記錄
+async function saveAirtableUserMail(userId, newEmail) {
+  const result = await getAirtableUserMail(userId);
+  let mail = "";
+  if (result.records.length > 0) {
+    mail = result.records[0].fields.email;
+  }
+  if (mail === "") {
+    // insert
+    console.log("insert mail...");
+    return new Promise((resolve, reject) => {
+      const baseId = process.env.AIRTABLE_BASE_ID;
+      const options = {
+        host: process.env.AIRTABLE_API_URL,
+        path: `/v0/${baseId}/UserInfos`,
+        port: 443,
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.AIRTABLE_API_TK}`,
+          "Content-Type": "application/json",
+        },
+      };
+
+      const DATA = JSON.stringify({
+        records: [
+          {
+            fields: {
+              userid: userId,
+              email: newEmail,
+            },
+          },
+        ],
+      });
+
+      const request = https.request(options, (response) => {
+        let data = "";
+        response.on("data", (chunk) => {
+          data += chunk;
+        });
+        response.on("end", () => {
+          try {
+            const result = JSON.parse(data);
+            console.log(result);
+            if (result.error) {
+              console.log(
+                `airtable : insert data Error  \r\n type:${result.error.type}  \r\n msg:${result.error.message}`
+              );
+            } else {
+              console.log(`airtable : insert data success`);
+            }
+            resolve(result);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+
+      request.on("error", (error) => {
+        console.log(`airtable: insert data Error , msg: ${result}`);
+        reject(error);
+      });
+      request.write(DATA);
+      request.end();
+    });
+  } else {
+    // update
+    console.log("update mail...");
+    return new Promise((resolve, reject) => {
+      const baseId = process.env.AIRTABLE_BASE_ID;
+      const options = {
+        host: process.env.AIRTABLE_API_URL,
+        path: `/v0/${baseId}/UserInfos/${result.records[0].id}`,
+        port: 443,
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${process.env.AIRTABLE_API_TK}`,
+          "Content-Type": "application/json",
+        },
+      };
+
+      const DATA = JSON.stringify({
+        fields: {
+          userid: userId,
+          email: newEmail,
+        },
+      });
+
+      const request = https.request(options, (response) => {
+        let data = "";
+        response.on("data", (chunk) => {
+          data += chunk;
+        });
+        response.on("end", () => {
+          try {
+            const result = JSON.parse(data);
+            console.log(result);
+            if (result.error) {
+              console.log(
+                `airtable : insert data Error  \r\n type:${result.error.type}  \r\n msg:${result.error.message}`
+              );
+            } else {
+              console.log(`airtable : insert data success`);
+            }
+            resolve(result);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+
+      request.on("error", (error) => {
+        console.log(`airtable: insert data Error , msg: ${result}`);
+        reject(error);
+      });
+      request.write(DATA);
+      request.end();
+    });
   }
 }
 
@@ -430,6 +684,9 @@ async function getAirtableData(userId, date) {
               `airtable : query table Error  \r\n type:${result.error.type}  \r\n msg:${result.error.message}`
             );
           } else {
+            if (result.records.length > 0) {
+              data = result.records[0].email;
+            }
             console.log(`airtable : query table success`);
           }
           resolve(result);
@@ -558,7 +815,28 @@ async function getAirtablesByBaseId() {
   });
 }
 
-function sendMail(userid, subject, content) {
+function sendMail( contentDate , userEmail ,userid, subject, content) {
+  //  text to pdf
+  const pdfFile = `pdf_file/${userid}.pdf`;
+  const doc = new pdfdocument();
+  doc.pipe(fs.createWriteStream(pdfFile));
+  doc.font("font/msyh.ttf", 27).text("我的日誌", 100, 30);
+  doc.moveTo(0, 80).lineTo(doc.page.width, 80).stroke();
+  doc
+    .font("font/msyh.ttf", 20)
+    .text(contentDate, 100, 100)
+    .font("font/msyh.ttf", 13)
+    .moveDown()
+    .text(content, {
+      width: 412,
+      align: "justify",
+      indent: 30,
+      columns: 1,
+      height: 300,
+      ellipsis: true,
+    });
+  doc.end();
+
   const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: 587,
@@ -571,15 +849,16 @@ function sendMail(userid, subject, content) {
 
   const mailOptions = {
     from: "cymkolor@cymmetrik.com",
-    to: "alex.rj.ho@cymmetrik.com",
+    to: userEmail,
     subject: subject,
-    text: '請參考附件',
-    attachments:[
+    text: "請參考附件",
+    attachments: [
       {
-        filename:'日誌.txt',
-        content:content
-      }
-    ]
+        filename: "日誌.pdf",
+        path: pdfFile,
+        contentType: "application/pdf",
+      },
+    ],
   };
 
   transporter.sendMail(mailOptions, (error, info) => {
